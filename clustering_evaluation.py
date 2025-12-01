@@ -134,13 +134,14 @@ class ClusteringEvaluator:
         start_time = time.time()
         pois_data_reset = self.pois_data.reset_index(drop=True)  # 重置索引确保连续性
         coords_rad_global = np.radians(self.coords)  # 将全局坐标转换为弧度
-        geohash_to_pois = defaultdict(list)  # GeoHash编码分组
 
-        for idx, row in pois_data_reset.iterrows():
-            gh = geohash.encode(row['latitude'], row['longitude'], geohash_precision)
-            geohash_to_pois[gh].append((idx, row['latitude'], row['longitude']))
+        pois_data_reset['geohash'] = pois_data_reset.apply(
+            lambda row: geohash.encode(row['latitude'], row['longitude'], geohash_precision),
+            axis=1
+        )
+        groups = pois_data_reset.groupby('geohash')
+        print(f"GeoHash划分区域数量: {len(groups)}")
 
-        print(f"GeoHash划分区域数量: {len(geohash_to_pois)}")
         all_labels = np.full(len(pois_data_reset), -1)  # 初始化标签数组
         cluster_id_offset = 0
 
@@ -148,29 +149,31 @@ class ClusteringEvaluator:
         region_stats = []
         processed_points = 0
         total_clusters_created = 0
-
+        # 初始化DBSCAN
+        db = DBSCAN(eps=eps_rad, min_samples=min_samples, metric='haversine')
         # 区域处理
-        for i, (gh, pois_in_gh) in enumerate(geohash_to_pois.items()):
-            n_points = len(pois_in_gh)
+        for gh, group in groups:
+            n_points = len(group)
 
             if n_points < min_samples:
                 region_stats.append((gh, n_points, 0, n_points))
                 continue
 
-            indices = [item[0] for item in pois_in_gh]  # 提取该区域的坐标（弧度）
-            coords_gh_rad = coords_rad_global[indices]  # 使用全局的弧度坐标
+            # 区域索引和坐标
+            indices = group.index.values
+            coords_gh_rad = coords_rad_global[indices]
 
-            # 在该区域内运行DBSCAN（Haversine距离）
-            db = DBSCAN(eps=eps_rad, min_samples=min_samples, metric='haversine')
+            # 在该区域内运行 DBSCAN
             labels_gh = db.fit_predict(coords_gh_rad)
 
-            # 统计该区域聚类情况
+            # 区域聚类统计
             unique_labels = set(labels_gh)
             n_clusters = len([l for l in unique_labels if l != -1])
             n_noise = np.sum(labels_gh == -1)
             region_stats.append((gh, n_points, n_clusters, n_noise))
             total_clusters_created += n_clusters
             processed_points += n_points
+
 
             # 重新编号并赋值标签
             for j, label in enumerate(labels_gh):

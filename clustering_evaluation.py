@@ -11,6 +11,55 @@ matplotlib.use('Qt5Agg')
 import os
 import time
 
+from numba import njit
+_base32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+
+@njit
+def geohash_encode_single(lat, lon, precision):
+    lat_interval = [-90.0, 90.0]
+    lon_interval = [-180.0, 180.0]
+
+    geohash_str = ""
+
+    is_even = True
+    bit = 0
+    ch = 0
+
+    for _ in range(precision * 5):
+        if is_even:
+            mid = (lon_interval[0] + lon_interval[1]) / 2
+            if lon > mid:
+                ch |= 1 << (4 - bit)
+                lon_interval[0] = mid
+            else:
+                lon_interval[1] = mid
+        else:
+            mid = (lat_interval[0] + lat_interval[1]) / 2
+            if lat > mid:
+                ch |= 1 << (4 - bit)
+                lat_interval[0] = mid
+            else:
+                lat_interval[1] = mid
+
+        is_even = not is_even
+
+        if bit < 4:
+            bit += 1
+        else:
+            geohash_str += _base32[ch]
+            bit = 0
+            ch = 0
+
+    return geohash_str
+
+
+@njit
+def geohash_encode_batch(lat_arr, lon_arr, precision):
+    n = len(lat_arr)
+    out = ["" for _ in range(n)]
+    for i in range(n):
+        out[i] = geohash_encode_single(lat_arr[i], lon_arr[i], precision)
+    return out
 
 class FoursquareDataLoader:
     def __init__(self, data_path):
@@ -120,7 +169,7 @@ class ClusteringEvaluator:
         n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
         n_noise = list(labels).count(-1)
         n_total_points = len(labels)
-        print(f"📊 聚类结果统计:")
+        print(f" 聚类结果统计:")
         print(f"  簇数量: {n_clusters}个")
         print(f"  噪声点: {n_noise}个 ({n_noise / n_total_points * 100:.1f}%)")
         print(f"  总点数: {n_total_points}个")
@@ -135,10 +184,16 @@ class ClusteringEvaluator:
         pois_data_reset = self.pois_data.reset_index(drop=True)  # 重置索引确保连续性
         coords_rad_global = np.radians(self.coords)  # 将全局坐标转换为弧度
 
-        pois_data_reset['geohash'] = pois_data_reset.apply(
-            lambda row: geohash.encode(row['latitude'], row['longitude'], geohash_precision),
-            axis=1
-        )
+        # pois_data_reset['geohash'] = pois_data_reset.apply(
+        #     lambda row: geohash.encode(row['latitude'], row['longitude'], geohash_precision),
+        #     axis=1
+        # )
+        lat_arr = pois_data_reset['latitude'].values
+        lon_arr = pois_data_reset['longitude'].values
+        _ = geohash_encode_single(40.0, -74.0, geohash_precision)  # 预编译numba函数
+
+        pois_data_reset['geohash'] = geohash_encode_batch(lat_arr, lon_arr, geohash_precision)
+
         groups = pois_data_reset.groupby('geohash')
         print(f"GeoHash划分区域数量: {len(groups)}")
 
@@ -255,8 +310,8 @@ class ClusteringEvaluator:
 
         # 方法1: 原始DBSCAN with Haversine
         labels_original, time_original = self.original_dbscan(eps_km, min_samples)
-        metrics_original = self.evaluate_clustering(labels_original, "Original DBSCAN")
-        metrics_original['execution_time'] = time_original
+        # metrics_original = self.evaluate_clustering(labels_original, "Original DBSCAN")
+        # metrics_original['execution_time'] = time_original
 
         # 方法2: GeoHash + DBSCAN with Haversine
         labels_geohash, time_geohash = self.geohash_dbscan(eps_km, min_samples, geohash_precision)
@@ -337,7 +392,7 @@ def main():
     # 参数（使用km单位）
     eps_km = 1.0  # 1.0公里（原来0.01°≈1.1km）
     min_samples = 3
-    geohash_precision = 5
+    geohash_precision = 4
 
     print(f"\n使用参数: eps={eps_km}, min_samples={min_samples}, geohash_precision={geohash_precision}")
 
